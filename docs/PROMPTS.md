@@ -231,3 +231,108 @@ commit and push to main
 ### Response
 
 Committed the `last_indexed_block` change to main and pushed it to origin. The staged diff was checked first: .env is untracked and neither endpoint value appears in it.
+
+## 2026-10-31 18:09:30 -03
+
+### Prompt
+
+```
+create run_block_saver.sh to run locally and a .env.block-saver.example
+```
+
+### Response
+
+Both files are created and the script works, but testing exposed a serious problem: a single writer can't keep up with the stream right now. In the first test run it stored 66 of 119 slots. Nothing is committed, and the stack is stopped with test data removed.
+
+Changes:
+- run_block_saver.sh: runs `docker compose up --build`, showing only block-saver's logs. "Locally" was read as Docker on this machine, following the Docker-for-everything rule. It exits with a clear message if .env.block-saver is missing. Ctrl-C stops the stack and block-saver exited 0 when tested with SIGINT.
+- .env.block-saver.example: contains only WSS_ENDPOINT, because compose.yaml sets DATABASE_URL.
+- compose.yaml: block-saver now reads .env.block-saver instead of .env.
+- .gitignore: `.env.*` is ignored, except `.env.*.example`. Without this, .env.block-saver could have been committed.
+- .env.block-saver was created locally with only WSS_ENDPOINT copied from .env, mode 600, ignored by git.
+
+Keeping-up problem:
+- Runs went through provider resets ("Connection reset without closing handshake") after 10-17s. One 20s run had none. Reconnects work, but nothing is replayed.
+- Lag climbed to about 10s before each reset.
+- Timing per message: parse about 3 ms, insert about 16 ms, and about 130 ms waiting for the frame to arrive.
+- Blocks now average 2.7 MB, up from 1.7 MB in the earlier runs, and each arrives twice. Keeping up needs about 25 MB/s; the connection delivered about 20 MB/s.
+- Not determined: whether the limit is the provider, the network or the client. CPU readings for block-saver were inconsistent (80% in one sample, 247% of a core in another), so the client's read path may be part of it. A plain HTTP block download was no faster, but it is too small a transfer to show a limit.
+
+Next step: profile the read path to separate a client limit from a provider one, and ask the provider why each block is sent twice. Removing the duplicate alone would cut the required rate to about 13 MB/s.
+
+The Postgres volume persists between script runs, and until a consumer exists the table only grows.
+
+## 2026-10-31 18:18:32 -03
+
+### Prompt
+
+```
+1. run_block_saver.sh is for running without docker.
+2. add a log trace on every block showing timetamp, slot, processing time, etc
+```
+
+### Response
+
+Both are done and tested in a 45s live run, and Ctrl-C exited 0. The same run shows the keeping-up problem is not caused by Docker: it stored 106 of 198 slots. Nothing is committed, and Postgres is stopped with test data removed.
+
+Start Postgres with `docker compose up -d postgres`, then run `./run_block_saver.sh`.
+
+Script changes:
+- run_block_saver.sh now loads .env.block-saver and runs `cargo run --release -p block-saver` on the host. It does not use Docker, so Postgres must already be running.
+- .env.block-saver.example gains DATABASE_URL, and the local .env.block-saver has it too.
+- compose.yaml publishes Postgres on 127.0.0.1:5432 only, because Postgres isn't installed on the host. The block-saver container still uses its own DATABASE_URL from compose.yaml.
+
+Trace: one line per block message, duplicates included, replacing the old saved and already-stored lines:
+
+```
+2026-10-31T21:17:53.394Z slot=463836856 parent=463836855 status=saved bytes=3684223 lag_ms=3394 wait_ms=153.4 parse_ms=3.0 save_ms=19.2 total_ms=22.2
+```
+
+- The timestamp is readed_time.
+- status is saved, skipped or failed.
+- lag_ms is readed_time minus block_time, so it is only accurate to about a second.
+- wait_ms is the time from finishing the previous block until this frame arrived.
+- total_ms is parse plus save.
+
+`cargo fmt --check`, clippy with `-D warnings` and 6 unit tests pass in Docker.
+
+Keeping-up problem, now running natively:
+
+| Measure | Mean | Median |
+| --- | --- | --- |
+| Block size | 3.95 MB | 3.78 MB |
+| wait_ms | 215.5 | 162.0 |
+| parse_ms | 3.6 | 3.5 |
+| save_ms | 22.2 | 20.0 |
+
+- There were 2 provider resets in 45s, and lag peaked at 7.8s.
+- Processing takes about 26 ms per message, so parsing and Postgres are not the limit.
+- Docker is ruled out: the rate was about 18 MB/s natively, matching the 20 MB/s measured in Docker.
+- Blocks keep growing: 1.7 MB, then 2.7 MB, now about 4 MB. At this size, with each block sent twice, keeping up needs about 37 MB/s.
+- Still not determined: whether the limit is the provider, the network or the client's WebSocket read path. Asking the provider about its per-connection limit and the duplicates is the next step.
+
+## 2026-10-31 18:22:13 -03
+
+### Prompt
+
+```
+You're on a home connection with a demo account! Don't try to achieve production performance here.
+```
+
+### Response
+
+Understood, that accounts for it. Falling behind, provider resets and missing slots are expected in this environment, so the keeping-up problem is closed and the next steps suggested for it are dropped. A memory note keeps this for future sessions. No code changed.
+
+The script, example file and block trace changes are still uncommitted.
+
+## 2026-10-31 18:22:48 -03
+
+### Prompt
+
+```
+commit and push to main
+```
+
+### Response
+
+Committed the host run script, the example env file and the per-block trace to main and pushed them to origin. The staged diff was checked first: of the env files only .env.block-saver.example is tracked, and neither endpoint value appears in the diff.

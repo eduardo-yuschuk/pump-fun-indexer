@@ -1,7 +1,7 @@
 use std::env;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::value::RawValue;
@@ -107,14 +107,41 @@ fn parse_message(text: &str) -> Result<Option<Block<'_>>, Error> {
     }))
 }
 
+/// `wait` is how long the frame took to arrive once the previous block was done.
+/// `lag_ms` is only accurate to a second, because `blockTime` has that resolution.
+fn block_trace(
+    block: &Block<'_>,
+    status: &str,
+    readed_time: DateTime<Utc>,
+    wait: Duration,
+    parse: Duration,
+    save: Duration,
+) -> String {
+    let lag_ms = block.block_time.map_or("-".to_string(), |time| {
+        (readed_time - time).num_milliseconds().to_string()
+    });
+    format!(
+        "{} slot={} parent={} status={status} bytes={} lag_ms={lag_ms} wait_ms={:.1} parse_ms={:.1} save_ms={:.1} total_ms={:.1}",
+        readed_time.to_rfc3339_opts(SecondsFormat::Millis, true),
+        block.slot,
+        block.parent_slot,
+        block.data.len(),
+        wait.as_secs_f64() * 1e3,
+        parse.as_secs_f64() * 1e3,
+        save.as_secs_f64() * 1e3,
+        (parse + save).as_secs_f64() * 1e3,
+    )
+}
+
 /// Retries until the block is persisted. Once shutdown is requested a failed
 /// attempt is final, so a database outage can't keep the process from exiting.
+/// Returns the outcome for the block trace.
 async fn save_block(
     pool: &PgPool,
     block: &Block<'_>,
     readed_time: DateTime<Utc>,
     shutdown: &watch::Receiver<bool>,
-) {
+) -> &'static str {
     loop {
         let result = sqlx::query(INSERT)
             .bind(block.slot)
@@ -125,17 +152,12 @@ async fn save_block(
             .execute(pool)
             .await;
         match result {
-            Ok(done) if done.rows_affected() == 0 => {
-                println!("slot {}: already stored or indexed", block.slot);
-                return;
-            }
-            Ok(_) => {
-                println!("slot {}: saved {} bytes", block.slot, block.data.len());
-                return;
-            }
+            // Already stored or indexed.
+            Ok(done) if done.rows_affected() == 0 => return "skipped",
+            Ok(_) => return "saved",
             Err(err) if *shutdown.borrow() => {
                 eprintln!("slot {}: NOT saved, shutting down: {err}", block.slot);
-                return;
+                return "failed";
             }
             Err(err) => {
                 eprintln!("slot {}: save failed, retrying: {err}", block.slot);
@@ -168,25 +190,39 @@ async fn read_blocks(
     println!("connected, subscribing");
 
     // Only block notifications move the deadline: pings prove nothing about the stream.
-    let mut deadline = Instant::now() + READ_TIMEOUT;
+    let mut ready_at = Instant::now();
     loop {
         // The save below runs outside this select, so a signal can't interrupt it.
         let message = tokio::select! {
             biased;
             _ = shutdown.wait_for(|stop| *stop) => return Ok(()),
-            message = timeout_at(deadline, ws.next()) => message,
+            message = timeout_at(ready_at + READ_TIMEOUT, ws.next()) => message,
         };
         let message = message
             .map_err(|_| "no block received within the read timeout")?
             .ok_or("stream closed")??;
+        let received_at = Instant::now();
         let readed_time = Utc::now();
         let Message::Text(text) = message else {
             continue;
         };
         if let Some(block) = parse_message(text.as_str())? {
-            save_block(pool, &block, readed_time, shutdown).await;
+            let parsed_at = Instant::now();
+            let status = save_block(pool, &block, readed_time, shutdown).await;
+            let saved_at = Instant::now();
+            println!(
+                "{}",
+                block_trace(
+                    &block,
+                    status,
+                    readed_time,
+                    received_at - ready_at,
+                    parsed_at - received_at,
+                    saved_at - parsed_at,
+                )
+            );
             *backoff = MIN_BACKOFF;
-            deadline = Instant::now() + READ_TIMEOUT;
+            ready_at = saved_at;
         }
     }
 }
@@ -245,6 +281,28 @@ mod tests {
                 block_time: DateTime::from_timestamp(1_700_000_000, 0),
                 data,
             })
+        );
+    }
+
+    #[test]
+    fn traces_block() {
+        let readed_time = DateTime::from_timestamp_millis(1_700_000_001_500).unwrap();
+        let block = Block {
+            slot: 100,
+            parent_slot: 99,
+            block_time: DateTime::from_timestamp(1_700_000_000, 0),
+            data: "{}",
+        };
+        assert_eq!(
+            block_trace(
+                &block,
+                "saved",
+                readed_time,
+                Duration::from_millis(130),
+                Duration::from_micros(2500),
+                Duration::from_millis(14),
+            ),
+            "2023-11-14T22:13:21.500Z slot=100 parent=99 status=saved bytes=2 lag_ms=1500 wait_ms=130.0 parse_ms=2.5 save_ms=14.0 total_ms=16.5"
         );
     }
 

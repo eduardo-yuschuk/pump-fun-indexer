@@ -5,6 +5,8 @@ services:
       POSTGRES_USER: indexer
       POSTGRES_PASSWORD: indexer
       POSTGRES_DB: indexer
+    ports:
+      - 127.0.0.1:5432:5432
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
@@ -16,7 +18,7 @@ services:
 
   block-saver:
     build: .
-    env_file: .env
+    env_file: .env.block-saver
     environment:
       DATABASE_URL: postgres://indexer:indexer@postgres/indexer
     depends_on:
