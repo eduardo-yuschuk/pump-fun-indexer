@@ -1,0 +1,29 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: indexer
+      POSTGRES_PASSWORD: indexer
+      POSTGRES_DB: indexer
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "indexer"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  block-saver:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://indexer:indexer@postgres/indexer
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+volumes:
+  pgdata:

@@ -1,0 +1,15 @@
+[package]
+name = "block-saver"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# Not used directly: selects the crypto provider tokio-tungstenite's TLS needs.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+sqlx = { version = "0.8", default-features = false, features = ["chrono", "postgres", "runtime-tokio"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tokio-tungstenite = { version = "0.28", features = ["connect", "rustls-tls-webpki-roots"] }

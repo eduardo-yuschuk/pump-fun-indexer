@@ -1,6 +1,0 @@
-[package]
-name = "pump-fun-indexer"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
