@@ -19,7 +19,10 @@ type Error = Box<dyn std::error::Error + Send + Sync>;
 const SUBSCRIBE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"blockSubscribe","params":["all",{"commitment":"finalized","encoding":"json","transactionDetails":"full","maxSupportedTransactionVersion":1,"showRewards":false}]}"#;
 
 const INSERT: &str = "INSERT INTO blocks (slot, parent_slot, block_time, readed_time, data)
-    VALUES ($1, $2, $3, $4, $5::json)
+    SELECT $1, $2, $3, $4, $5::json
+    FROM last_indexed_block
+    WHERE slot < $1
+    FOR SHARE
     ON CONFLICT (slot) DO NOTHING";
 
 // Blocks arrive every ~400ms, so this much silence means the connection is dead.
@@ -123,7 +126,7 @@ async fn save_block(
             .await;
         match result {
             Ok(done) if done.rows_affected() == 0 => {
-                println!("slot {}: already stored", block.slot);
+                println!("slot {}: already stored or indexed", block.slot);
                 return;
             }
             Ok(_) => {

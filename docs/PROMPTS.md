@@ -175,3 +175,59 @@ commit and push to main
 ### Response
 
 Committed the block-saver work to main and pushed it to origin. The staged diff was checked first: .env is untracked and neither endpoint value appears in it.
+
+## 2026-10-31 17:44:01 -03
+
+### Prompt
+
+```
+Regarding the problems to be solved:
+
+1. Deleting can bring a block back: We could leave a large window of blocks to be deleted but not yet deleted, but eventually that window might not be enough. To definitively solve this, we'll create another table, `last_indexed_block`, which records the slot of the last indexed block. Since we're not susceptible to reorgs, the slot is sufficient. We only insert a block into `blocks` if the slot is larger than the last indexed block.
+
+2. Any disconnect loses blocks: We'll write another component for this later.
+
+3. `parent_slot` can no longer find gaps on its own: We'll leave a window of a few blocks to detect gaps and calculate real-time latency for monitoring purposes. This is a problem that the next component we develop will solve; for now, we're fine.
+
+4. Okay, I'm fine with that.
+```
+
+### Response
+
+Problem 1 is fixed: block-saver now stores a block only if its slot is above `last_indexed_block`. Nothing is committed, and the stack is stopped with test data removed.
+
+Changes:
+- db/init/002_last_indexed_block.sql: a one-row table seeded with slot 0.
+- crates/block-saver/src/main.rs: the insert now selects from that row `WHERE slot < $1 FOR SHARE`, and keeps ON CONFLICT DO NOTHING. A plain comparison would leave a small race where a writer checks just before the consumer commits and brings the deleted block back. FOR SHARE closes it: the consumer's UPDATE waits for in-flight inserts, and those inserts see a committed advance.
+- The log line is now `already stored or indexed`.
+
+Results with two writers on the live stream and a simulated consumer deleting within about 5 ms:
+
+| Test | Before | After |
+| --- | --- | --- |
+| Times each slot was saved | Up to 4 (72 of 86 slots saved 4 times) | Exactly once (85 of 85) |
+
+- Boundary: with the mark set ahead of the stream, the mark slot was rejected and `mark + 1` was the first stored, in two runs. Every slot above the mark was stored without gaps.
+- One earlier run of the mark test stored its first block 13 slots above the mark. It did not recur, and that data was gone before I could check it. A burst of skipped slots is the likely cause, but that is not confirmed.
+- `cargo fmt --check`, clippy with `-D warnings` and the 5 unit tests pass in Docker.
+
+Rules the next component must follow:
+1. In one short transaction: UPDATE last_indexed_block first, then DELETE the block. Writers wait while that transaction is open.
+2. The last_indexed_block row must never be deleted. Without it, every block is rejected and only the `already stored or indexed` log line shows it.
+3. Don't advance past a gap that hasn't been recovered. The guard will reject any recovered block at or below the mark, including one inserted through block-saver's query. Skipped slots are normal, so use parent_slot to tell them from lost blocks.
+
+Any Postgres volume created before this change needs 002_last_indexed_block.sql applied by hand. None exists now.
+
+No action on problems 2, 3 and 4, as agreed.
+
+## 2026-10-31 18:01:58 -03
+
+### Prompt
+
+```
+commit and push to main
+```
+
+### Response
+
+Committed the `last_indexed_block` change to main and pushed it to origin. The staged diff was checked first: .env is untracked and neither endpoint value appears in it.
