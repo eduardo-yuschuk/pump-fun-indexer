@@ -27,5 +27,17 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
 
+  block-verifier:
+    build: .
+    command: block-verifier
+    env_file: .env.block-verifier
+    environment:
+      DATABASE_URL: postgres://indexer:indexer@postgres/indexer
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 30s
+
 volumes:
   pgdata:

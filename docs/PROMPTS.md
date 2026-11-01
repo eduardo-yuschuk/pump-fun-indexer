@@ -336,3 +336,70 @@ commit and push to main
 ### Response
 
 Committed the host run script, the example env file and the per-block trace to main and pushed them to origin. The staged diff was checked first: of the env files only .env.block-saver.example is tracked, and neither endpoint value appears in the diff.
+
+## 2026-10-31 23:21:11 -03
+
+### Prompt
+
+```
+Let's start with the second component. block-verifier: checks chain continuity across blocks and requests missing blocks taking
+  blocks from blocks table. If a block does not exist for a given slot, the verifier must generate a tuple with no data and a `skipped`
+  column set to `true`. All blocks verified as consecutive must have their `verified` column set to `true`; this is the signal for
+  subsequent phases of the system to consume the block.
+```
+
+### Response
+
+block-verifier is written and works: in a live run with a real 12s saver outage, every slot from first to last ended up verified and matched `getBlocks` exactly. Nothing is committed.
+
+**Before running it:** apply db/init/003_block_verifier.sql by hand to any existing database. Without it block-verifier exits at startup, while block-saver keeps working. I did not touch the Postgres on port 5432.
+
+How it works, starting from the last verified slot and looking at the next stored block:
+- Its parent is the last verified slot: any slots between them become `skipped` rows, and the block is marked `verified`, in one statement.
+- Its parent is higher: that parent is missing, so it is fetched with `getBlock` and stored, and the walk repeats down to the last verified slot.
+- Its parent is lower: this contradicts the chain, so verification stops and logs the problem every second until someone fixes it.
+
+Decisions to check:
+1. Skipped slots come from the parent link, not from an RPC "no block" answer. Those errors can also mean the node doesn't have the block, which would mark a real block as skipped. This also spends no RPC calls on skipped slots.
+2. Skipped rows are also `verified`, with `parent_slot`, `block_time`, `readed_time` and `data` all NULL, so consumers must handle them.
+3. On a first run (mark 0, nothing verified) the lowest stored block is accepted as the start of the chain. Later starts resume from the higher of the mark and the last verified slot.
+4. Continuity is checked by `parent_slot` only, not by blockhash, following your point that there are no reorgs at finalized.
+5. Run a single instance. A second one would be safe but would waste RPC calls.
+
+Test results, on a throwaway Postgres in the scratchpad:
+
+| Test | Result |
+| --- | --- |
+| Stub RPC: 3 lost blocks, 2 skipped slots, one transient RPC error | Recovered, verified in order, all rows correct |
+| Restart, and all blocks consumed by the indexer | Resumed from the right slot, including from the mark alone |
+| Parent below the last verified slot | Stalled and did not verify the block |
+| Provider down | Retried, API key not in the logs |
+| SIGINT | Exited 0 |
+| Live, 12s saver outage | 269 slots: 206 from the stream, 63 recovered, no holes or broken links, 0 stalls, same 269 slots as `getBlocks` |
+
+`cargo fmt --check`, clippy with `-D warnings` and all 15 unit tests pass (9 new).
+
+Not tested:
+- No skipped slot occurred in the live runs, so that path is only proven against the stub.
+- Docker isn't reachable from this session, so the Dockerfile change and the new compose service were never built or run.
+
+Risks:
+- **RPC blocks are not identical to stream blocks.** In the one block I diffed (331 transactions), the only difference was `logMessages`: `[]` from the stream, `null` from RPC, on 7 transactions. Three other blocks differed by 9 to 39 characters; I did not break those down, and at least one (the 9-character block) must have some other difference. The indexer must accept both forms.
+- **Recovery is one block at a time**, median 303 ms, so about 3 blocks/s. A long outage clears slowly, and verified blocks wait until it does.
+- **A block the provider no longer has stalls verification forever**, with a log line every second.
+
+Also added .env.block-verifier.example, run_block_verifier.sh and a local .env.block-verifier (mode 600, ignored by git).
+
+.env.block-saver.example shows as modified (`DATABASE_URL` changed to `postgres:postgres`). That edit appeared during this session and isn't mine, so I left it.
+
+## 2026-10-31 23:50:48 -03
+
+### Prompt
+
+```
+commit and push to main
+```
+
+### Response
+
+Committed block-verifier to main and pushed it to origin. The staged diff was checked first: of the env files only .env.block-verifier.example is added, and neither endpoint value appears in it. .env.block-saver.example was left out of the commit, because that edit isn't mine, so it still shows as modified.
