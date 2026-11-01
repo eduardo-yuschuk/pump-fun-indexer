@@ -403,3 +403,27 @@ commit and push to main
 ### Response
 
 Committed block-verifier to main and pushed it to origin. The staged diff was checked first: of the env files only .env.block-verifier.example is added, and neither endpoint value appears in it. .env.block-saver.example was left out of the commit, because that edit isn't mine, so it still shows as modified.
+
+## 2026-11-01 00:41:58 -03
+
+### Prompt
+
+```
+let's make an experiment. read some block through blockSubscribe and store it on ./temp folder, then read the same block through RPC and compare the content to understand if some format conversion is required before saving on blocks table.
+```
+
+### Response
+
+Fetched 4 finalized blocks via blockSubscribe (getblock) and getBlock (chainstack) with the same parameters as the saver and verifier, saved in ./temp (`<slot>_stream_frame.json`, `_stream_block.json`, `_rpc_response.json`, `_rpc_block.json`). Parsed, 3 of 4 are identical. The 4th (slot 463944483) differs only in `meta.logMessages` on 2 transactions: `[]` from the stream, `null` from RPC. Raw text differs in object key order everywhere. No format conversion is needed to store the block.
+
+## 2026-11-01 01:02:45 -03
+
+### Prompt
+
+```
+commit and push to main
+```
+
+### Response
+
+Committed the stream-vs-RPC experiment notes (docs/PROMPTS.md) and the /temp ignore rule (.gitignore) to main and pushed. .env.block-saver.example was left out, because that edit isn't mine.
